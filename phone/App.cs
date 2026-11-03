@@ -11,7 +11,7 @@ namespace LumiaAgent
 
         public App()
         {
-            AppLog.Write("App constructor 0.1.6");
+            AppLog.Write("App constructor 0.1.12");
             UnhandledException += (s, e) => {
                 AppLog.Exception("Unhandled", e.ExceptionObject);
                 MessageBox.Show("Lumia Agent error: " + e.ExceptionObject.GetType().Name);

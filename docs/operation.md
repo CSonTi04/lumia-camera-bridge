@@ -23,6 +23,8 @@ All `/v1/*` calls require the agent bearer token. The phone uses the separate de
 
 Coordinates use the encoded JPEG's top-left origin. No endpoint automatically rotates or mirrors pixels based on EXIF. Map thumbnail coordinates to the original dimensions before cropping. UI orientation does not change this coordinate convention.
 
+An explicit `encode_orientation_degrees` control can rotate pixels on the phone before encoding. Use the returned image dimensions for crops. A `focus_region` uses normalized unrotated preview coordinates, which differ from full-resolution JPEG pixel coordinates. See [camera controls](camera-controls.md).
+
 Original captures are retained byte for byte. Crops decode the JPEG and re-encode the selected region at quality 95; they are not lossless JPEG bitstream crops. Preview uses a smaller viewfinder buffer. Front stills use that camera's enumerated maximum; rear stills explicitly request the documented 1020 modes.
 
 Jobs expire after 180 seconds, with a queue bound of 16. A new phone session cancels outstanding work. After an error or reconnect, submit a fresh job; old jobs are not silently replayed. Completed records remain in memory for up to an hour. Original image data survives bridge restarts.
@@ -35,6 +37,6 @@ The CLI reads its credential from `LUMIA_AGENT_TOKEN` or a private config file. 
 
 ## Limits
 
-No video streaming, RAW/DNG, manual exposure controls or ordinary background camera service is implemented. The 41 MP sensor marketing figure is not a promise of a rectangular 41 MP JPEG. Lighting, focus and hand motion still determine useful image detail.
+No video streaming, RAW/DNG or ordinary background camera service is implemented. Native still-camera controls are exposed when reported as supported by the phone. The 41 MP sensor marketing figure is not a promise of a rectangular 41 MP JPEG. Lighting, focus and hand motion still determine useful image detail. A reported autofocus lock does not guarantee a sharp image.
 
 Factory-reset recovery and hardware restoration are untested. This repository deliberately excludes phone backups, identifiers, firmware, private logs and real camera samples.

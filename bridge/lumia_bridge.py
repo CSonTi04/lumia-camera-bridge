@@ -14,10 +14,12 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 from PIL import Image
+from camera_controls import applied_metadata, clean_capabilities, openapi_with_controls, validate_request, wire_controls, wire_region
 
 Image.MAX_IMAGE_PIXELS = 50_000_000
 MAX_JPEG = 40 * 1024 * 1024
 ID = r'[a-f0-9]{32}'
+FOCUS_RANGES = ('auto', 'normal', 'macro', 'full', 'infinity', 'hyperfocal')
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'bridge' / 'static'
 DOC_ASSETS = {
@@ -45,6 +47,7 @@ class State:
         self.processing = threading.Semaphore(1)  # Bound RAM on the Pi.
         self.last_seen, self.device = 0, None
         self.session = None
+        self.capabilities = None
         for path in self.data.glob('*.json'):
             item = json.loads(path.read_text('utf-8'))
             if re.fullmatch(ID, item.get('id', '')) and (self.data / (item['id'] + '.jpg')).exists():
@@ -71,17 +74,28 @@ class State:
         camera = params.get('camera', 'rear')
         aspect = params.get('aspect', '4:3')
         focus = params.get('focus', kind == 'capture')
+        focus_range = params.get('focus_range', 'auto')
         if camera not in ('rear', 'front') or aspect not in ('4:3', '16:9', 'maximum') or type(focus) is not bool:
             raise APIError(400, 'camera: rear/front; aspect: 4:3/16:9/maximum; focus: boolean')
+        if focus_range not in FOCUS_RANGES:
+            raise APIError(400, 'focus_range: auto/normal/macro/full/infinity/hyperfocal')
+        if focus_range != 'auto' and (not focus or camera != 'rear'):
+            raise APIError(400, 'An explicit focus_range requires focus=true and the rear camera')
         with self.condition:
             self.expire()
             if not self.connected():
                 raise APIError(503, 'No phone connected. Open Lumia Agent and connect to this bridge.')
+            if focus_range != 'auto' and self.device.get('protocol_version', 1) < 2:
+                raise APIError(409, 'Explicit focus ranges require Lumia Agent 0.1.8 or later')
+            try:
+                controls, region = validate_request(params, camera, focus, self.device.get('protocol_version', 1), self.capabilities)
+            except ValueError as error:
+                raise APIError(400, str(error)) from error
             if sum(j['status'] in ('queued', 'running') for j in self.jobs.values()) >= 16:
                 raise APIError(429, 'Camera queue is full.')
             key = secrets.token_hex(16)
             now = time.monotonic()
-            job = dict(id=key, kind=kind, camera=camera, aspect=aspect, focus=focus,
+            job = dict(id=key, kind=kind, camera=camera, aspect=aspect, focus=focus, focus_range=focus_range, controls=controls, focus_region=region,
                        status='queued', _created=now, _deadline=now + 180)
             self.jobs[key] = job
             self.pending.append(key)
@@ -95,6 +109,20 @@ class State:
                     raise ValueError('Expected JPEG with at most 50 million pixels')
                 width, height = image.size
                 orientation = image.getexif().get(274, 1)
+                exposure = {}
+                try:
+                    exif = image.getexif()
+                    tags = {**dict(exif), **(exif.get_ifd(34665) if 34665 in exif else {})}
+                    if 33434 in tags:
+                        value = float(tags[33434])
+                        if 0 < value < 3600:
+                            exposure['exposure_seconds'] = value
+                    if 34855 in tags:
+                        value = int(tags[34855])
+                        if 0 < value < 10_000_000:
+                            exposure['iso'] = value
+                except (ValueError, TypeError, OverflowError, ZeroDivisionError):
+                    pass
                 image.verify()
         except Exception as exc:
             raise APIError(400, 'Invalid JPEG: ' + str(exc)) from exc
@@ -105,6 +133,7 @@ class State:
                     url='/v1/images/' + key + '.jpg')
         if extra:
             meta.update(extra)
+        meta.update(exposure)
         target = self.data / (key + '.jpg')
         target.with_suffix('.tmp').write_bytes(data)
         target.with_suffix('.tmp').replace(target)
@@ -126,7 +155,7 @@ class Server(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
-    server_version = 'LumiaBridge/0.2'
+    server_version = 'LumiaBridge/0.4'
 
     def setup(self):
         super().setup()
@@ -163,13 +192,40 @@ class Handler(BaseHTTPRequestHandler):
             raise APIError(400, 'Incomplete body')
         return data
 
-    def json_body(self):
+    def json_body(self, limit=16384):
         try:
-            result = json.loads(self.body())
+            result = json.loads(self.body(limit))
         except (ValueError, UnicodeError):
             raise APIError(400, 'Expected JSON object')
         if not isinstance(result, dict):
             raise APIError(400, 'Expected JSON object')
+        return result
+
+    def focus_metadata(self):
+        status = self.headers.get('X-Camera-Focus-Status')
+        if status is None:
+            return {}  # Older phone versions do not report focus telemetry.
+        attempts = self.headers.get('X-Camera-Focus-Attempts', '0')
+        selected = self.headers.get('X-Camera-Focus-Range', 'device_default')
+        supported = self.headers.get('X-Camera-Focus-Ranges', '')
+        ranges = supported.split(',') if supported else []
+        if status not in ('locked', 'manual', 'skipped', 'unsupported') or attempts not in ('0', '1', '2'):
+            raise APIError(400, 'Invalid focus result metadata')
+        if (status == 'locked') != (attempts in ('1', '2')):
+            raise APIError(400, 'Inconsistent focus attempt count')
+        if selected not in FOCUS_RANGES[1:] + ('device_default', 'unchanged', 'fixed', 'manual'):
+            raise APIError(400, 'Invalid focus range result')
+        if len(ranges) > 5 or len(set(ranges)) != len(ranges) or any(item not in FOCUS_RANGES[1:] for item in ranges):
+            raise APIError(400, 'Invalid supported focus ranges')
+        result = dict(focus_status=status, focus_attempts=int(attempts), focus_range=selected, supported_focus_ranges=ranges)
+        applied = self.headers.get('X-Camera-Applied-Controls')
+        if applied is not None:
+            try:
+                if len(applied) > 4096:
+                    raise ValueError('Applied controls header too large')
+                result['applied_controls'] = applied_metadata(json.loads(applied))
+            except (ValueError, TypeError) as error:
+                raise APIError(400, 'Invalid applied control metadata') from error
         return result
 
     def auth(self, role):
@@ -207,13 +263,20 @@ class Handler(BaseHTTPRequestHandler):
         if method == 'GET' and path in ('/', '/docs', '/docs/', '/swagger'):
             return self.send(200, (STATIC / 'docs.html').read_bytes(), 'text/html; charset=utf-8')
         if method == 'GET' and path == '/openapi.json':
-            return self.send(200, json.loads((ROOT / 'openapi.json').read_text('utf-8-sig')))
+            with state.condition:
+                capabilities = state.capabilities
+            return self.send(200, openapi_with_controls(json.loads((ROOT / 'openapi.json').read_text('utf-8-sig')), capabilities))
         if method == 'GET' and path in DOC_ASSETS:
             relative, content_type = DOC_ASSETS[path]
             return self.send(200, (STATIC / relative).read_bytes(), content_type)
         if method == 'GET' and path == '/healthz':
-            return self.send(200, dict(service='lumia-bridge', version='0.2'))
+            return self.send(200, dict(service='lumia-bridge', version='0.4'))
         self.auth('device' if path.startswith('/device/') else 'agent')
+        if method == 'GET' and path == '/v1/capabilities':
+            with state.condition:
+                result = dict(ready=state.capabilities is not None, connected=state.connected(), device=state.device,
+                              cameras=state.capabilities['cameras'] if state.capabilities else [])
+            return self.send(200, result)
         if method == 'GET' and path == '/v1/status':
             with state.condition:
                 state.expire()
@@ -268,6 +331,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(201, crop)
         if method == 'POST' and path == '/device/register':
             info = self.json_body()
+            protocol = info.get('protocol_version', 1)
+            if type(protocol) is not int or protocol not in (1, 2, 3):
+                raise APIError(400, 'Unsupported phone protocol version')
             with state.condition:
                 # A registration starts a new session and invalidates old in-flight work.
                 for job in state.jobs.values():
@@ -276,9 +342,23 @@ class Handler(BaseHTTPRequestHandler):
                 state.pending.clear()
                 state.session = secrets.token_hex(16)
                 state.device = {k: info.get(k) for k in ('model', 'os', 'app_version')}
+                state.device['protocol_version'] = protocol
+                state.capabilities = None
                 state.last_seen = time.monotonic()
                 session = state.session
             return self.send(200, session, 'text/plain')
+        if method == 'POST' and path == '/device/capabilities':
+            report = self.json_body(131072)
+            try:
+                clean = clean_capabilities(report)
+            except ValueError as error:
+                raise APIError(400, str(error)) from error
+            with state.condition:
+                if self.headers.get('X-Device-Session') != state.session:
+                    raise APIError(409, 'Session replaced')
+                state.capabilities = clean
+                state.last_seen = time.monotonic()
+            return self.send(200, dict(accepted=True))
         if method == 'GET' and path == '/device/next':
             session = self.headers.get('X-Device-Session')
             with state.condition:
@@ -293,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
                         job = state.jobs[state.pending.popleft()]
                         job['status'] = 'running'
                         job['_session'] = session
-                        command = '\n'.join([job['id'], job['kind'], job['camera'], job['aspect'], str(job['focus']).lower()])
+                        command = '\n'.join([job['id'], job['kind'], job['camera'], job['aspect'], str(job['focus']).lower(), job['focus_range'], wire_controls(job['controls']), wire_region(job['focus_region'])])
                         break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -305,6 +385,7 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch('/device/(result|error)/(' + ID + ')', path)
         if method == 'POST' and match:
             action, key = match.groups()
+            focus_meta = self.focus_metadata() if action == 'result' else {}
             data = self.body(MAX_JPEG if action == 'result' else 4096)
             with state.condition:
                 state.expire()
@@ -314,7 +395,10 @@ class Handler(BaseHTTPRequestHandler):
                 if action == 'error':
                     job.update(status='error', error=data.decode('utf-8', 'replace'))
                 else:
-                    meta = state.store(data, job['kind'], dict(camera=job['camera'], aspect=job['aspect']))
+                    extra = dict(camera=job['camera'], aspect=job['aspect'], **focus_meta)
+                    if job['focus_region'] is not None:
+                        extra['focus_region'] = job['focus_region']
+                    meta = state.store(data, job['kind'], extra)
                     if job['kind'] == 'capture' and job['camera'] == 'rear' and meta['width'] * meta['height'] < 30_000_000:
                         job.update(status='error', error='Rear camera returned less than 30 MP; full-resolution capture is unavailable.', image=meta)
                     else:

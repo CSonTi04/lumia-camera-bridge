@@ -2,7 +2,7 @@
 <Deployment xmlns="http://schemas.microsoft.com/windowsphone/2012/deployment" AppPlatformVersion="8.0">
  <DefaultLanguage xmlns="" code="en-US" />
  <App xmlns="" ProductID="{D66C350D-2C68-4C77-91F5-0871A6A44A83}" Title="Lumia Agent" RuntimeType="Silverlight"
-  Version="0.1.6.0" Genre="apps.normal" Author="Lumia Agent" Description="Camera bridge for local AI agents"
+  Version="0.1.12.0" Genre="apps.normal" Author="Lumia Agent" Description="Camera bridge for local AI agents"
   Publisher="Lumia Agent" PublisherID="{9601B85A-664A-420D-B641-6EA7C765BA66}">
   <IconPath IsRelative="true" IsResource="false">ApplicationIcon.png</IconPath>
   <Capabilities><Capability Name="ID_CAP_NETWORKING" /><Capability Name="ID_CAP_ISV_CAMERA" /></Capabilities>

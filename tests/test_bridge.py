@@ -20,6 +20,16 @@ def jpeg(width=640, height=480):
     return output.getvalue()
 
 
+def capability_fixture():
+    def control(name, low, high, nullable=False):
+        return dict(name=name, supported=True, value_type='integer', unit='test units',
+                    nullable=nullable, minimum=low, maximum=high, choices=[])
+    return dict(version=1, cameras=[dict(camera='rear', autofocus_supported=True, focus_region_supported=True,
+        controls=[control('iso', 100, 3200, True), control('exposure_time_us', 100, 1000000, True),
+                  control('manual_focus_position', 0, 1000)]),
+        dict(camera='front', autofocus_supported=False, focus_region_supported=False, controls=[])])
+
+
 class HTTPWorkflow(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -37,9 +47,10 @@ class HTTPWorkflow(unittest.TestCase):
         self.thread.join()
         self.temp.cleanup()
 
-    def call(self, path, payload=None, role='agent', raw=False, session=None):
+    def call(self, path, payload=None, role='agent', raw=False, session=None, extra_headers=None):
         data = payload if isinstance(payload, bytes) else None if payload is None else json.dumps(payload).encode()
         headers = {} if role is None else {'Authorization': 'Bearer ' + self.config[role + '_token']}
+        headers.update(extra_headers or {})
         if role == 'device' and (session or self.session):
             headers['X-Device-Session'] = session or self.session
         req = Request(self.base + path, data=data, headers=headers)
@@ -50,8 +61,8 @@ class HTTPWorkflow(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.loads(error.read())
 
-    def register(self):
-        code, self.session = self.call('/device/register', {'model': 'SIMULATED Lumia 1020', 'os': '8.1'}, role='device', raw=True)
+    def register(self, protocol_version=1):
+        code, self.session = self.call('/device/register', {'model': 'SIMULATED Lumia 1020', 'os': '8.1', 'protocol_version': protocol_version}, role='device', raw=True)
         self.session = self.session.decode()
         self.assertEqual(code, 200)
 
@@ -162,6 +173,101 @@ class HTTPWorkflow(unittest.TestCase):
         job = self.acquire()
         self.assertEqual(self.call('/device/result/' + job['id'], b'not an image', role='device')[0], 400)
         self.assertEqual(self.call('/v1/jobs/' + job['id'])[1]['status'], 'running')
+
+    def test_focus_range_requires_capable_phone_and_valid_request(self):
+        self.register()
+        self.assertEqual(self.call('/v1/captures', {'focus_range': 'normal'})[0], 409)
+        self.assertEqual(self.call('/v1/captures', {'focus_range': 'other'})[0], 400)
+        self.assertEqual(self.call('/v1/preview', {'focus_range': 'normal', 'focus': False})[0], 400)
+        self.register(protocol_version=2)
+        self.assertEqual(self.call('/v1/captures', {'focus_range': 'normal', 'camera': 'front'})[0], 400)
+        job = self.acquire('preview', focus=True, focus_range='normal')
+        self.assertTrue(job['focus'])
+        self.assertEqual(job['focus_range'], 'normal')
+
+    def test_reported_focus_result_survives_with_original_jpeg(self):
+        self.register(protocol_version=2)
+        job = self.acquire('preview', focus=True, focus_range='normal')
+        original = jpeg()
+        headers = {'X-Camera-Focus-Status': 'locked', 'X-Camera-Focus-Attempts': '2',
+                   'X-Camera-Focus-Range': 'normal', 'X-Camera-Focus-Ranges': 'normal,macro,full'}
+        self.assertEqual(self.call('/device/result/' + job['id'], original, role='device', extra_headers=headers)[0], 200)
+        image = self.call('/v1/jobs/' + job['id'])[1]['image']
+        self.assertEqual(image['focus_status'], 'locked')
+        self.assertEqual(image['focus_attempts'], 2)
+        self.assertEqual(image['supported_focus_ranges'], ['normal', 'macro', 'full'])
+        self.assertEqual(self.call(image['url'], raw=True)[1], original)
+        self.assertEqual(State(self.temp.name, self.config).images[image['id']]['focus_range'], 'normal')
+
+    def test_focus_failure_and_invalid_metadata_do_not_claim_success(self):
+        self.register(protocol_version=2)
+        job = self.acquire('preview', focus=True)
+        self.assertEqual(self.call('/device/result/' + job['id'], jpeg(), role='device', extra_headers={
+            'X-Camera-Focus-Status': 'locked', 'X-Camera-Focus-Attempts': '0'})[0], 400)
+        self.assertEqual(len(self.state.images), 0)
+        self.assertEqual(self.call('/device/error/' + job['id'], b'Autofocus did not lock after two attempts.', role='device')[0], 200)
+        result = self.call('/v1/jobs/' + job['id'])[1]
+        self.assertEqual(result['status'], 'error')
+        self.assertNotIn('image', result)
+
+    def test_capabilities_drive_schema_validation_and_wire_controls(self):
+        self.register(protocol_version=3)
+        self.assertFalse(self.call('/v1/capabilities')[1]['ready'])
+        self.assertEqual(self.call('/device/capabilities', capability_fixture(), role='device')[0], 200)
+        self.assertTrue(self.call('/v1/capabilities')[1]['ready'])
+        schema = self.call('/openapi.json', role=None)[1]['components']['schemas']['CameraRequest']['properties']['controls']
+        self.assertEqual(schema['properties']['iso']['maximum'], 3200)
+        self.assertNotIn('flash_power', schema['properties'])
+        self.assertEqual(self.call('/v1/captures', {'controls': {'iso': 50}})[0], 400)
+        self.assertEqual(self.call('/v1/captures', {'controls': {'iso': True}})[0], 400)
+        self.assertEqual(self.call('/v1/captures', {'controls': {'unknown': 1}})[0], 400)
+        self.assertEqual(self.call('/v1/captures', {'camera': 'front', 'controls': {'iso': 400}})[0], 400)
+        self.assertEqual(self.call('/v1/captures', {'controls': {'manual_focus_position': 500}})[0], 400)
+        _, job = self.call('/v1/preview', {'controls': {'iso': 400, 'exposure_time_us': 8000}})
+        command = self.call('/device/next', role='device', raw=True)[1].decode().split('\n')
+        self.assertEqual(command[6], 'exposure_time_us=8000;iso=400')
+        headers = {'X-Camera-Focus-Status': 'skipped', 'X-Camera-Focus-Range': 'unchanged',
+                   'X-Camera-Applied-Controls': '{"iso":400,"exposure_time_us":8000}'}
+        self.assertEqual(self.call('/device/result/' + job['id'], jpeg(), role='device', extra_headers=headers)[0], 200)
+        self.assertEqual(self.call('/v1/jobs/' + job['id'])[1]['image']['applied_controls']['iso'], 400)
+
+    def test_focus_region_is_validated_sent_and_persisted(self):
+        self.register(protocol_version=3)
+        self.call('/device/capabilities', capability_fixture(), role='device')
+        region = dict(x=0.25, y=0.25, width=0.5, height=0.5)
+        self.assertEqual(self.call('/v1/preview', {'focus': False, 'focus_region': region})[0], 400)
+        self.assertEqual(self.call('/v1/preview', {'focus': True, 'focus_region': dict(region, width=1)})[0], 400)
+        _, job = self.call('/v1/preview', {'focus': True, 'focus_region': region})
+        command = self.call('/device/next', role='device', raw=True)[1].decode().split('\n')
+        self.assertEqual(command[7], '0.25,0.25,0.5,0.5')
+        headers = {'X-Camera-Focus-Status': 'locked', 'X-Camera-Focus-Attempts': '1'}
+        self.assertEqual(self.call('/device/result/' + job['id'], jpeg(), role='device', extra_headers=headers)[0], 200)
+        image = self.call('/v1/jobs/' + job['id'])[1]['image']
+        self.assertEqual(State(self.temp.name, self.config).images[image['id']]['focus_region'], region)
+
+    def test_capability_sessions_and_invalid_reports(self):
+        self.register(protocol_version=3)
+        previous = self.session
+        self.call('/device/capabilities', capability_fixture(), role='device')
+        self.register(protocol_version=3)
+        self.assertFalse(self.call('/v1/capabilities')[1]['ready'])
+        self.assertEqual(self.call('/device/capabilities', capability_fixture(), role='device', session=previous)[0], 409)
+        self.assertEqual(self.call('/device/capabilities', {'version': 1, 'cameras': ['bad']}, role='device')[0], 400)
+        self.assertEqual(self.call('/v1/capabilities', role=None)[0], 401)
+
+    def test_exif_reports_actual_exposure_without_changing_original(self):
+        self.register()
+        job = self.acquire()
+        output = io.BytesIO()
+        exif = Image.Exif()
+        exif[34665] = {33434: 0.008, 34855: 400}
+        Image.new('RGB', (640, 480)).save(output, 'JPEG', exif=exif)
+        original = output.getvalue()
+        self.call('/device/result/' + job['id'], original, role='device')
+        image = self.call('/v1/jobs/' + job['id'])[1]['image']
+        self.assertEqual(image['iso'], 400)
+        self.assertAlmostEqual(image['exposure_seconds'], 0.008, places=4)
+        self.assertEqual(self.call(image['url'], raw=True)[1], original)
 
 
 if __name__ == '__main__':

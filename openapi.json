@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Lumia Agent Camera",
-    "version": "0.2.0",
+    "version": "0.4.0",
     "description": "Asynchronous preview and full-resolution still capture through a Raspberry Pi bridge. Coordinates use unrotated encoded JPEG pixels. Phone app must be foregrounded. Manual workflow: authorize with agent_token, submit a camera job, poll its id, then retrieve image.url or crop the retained original. Keep Lumia Agent open; use the explorer from another device."
   },
   "servers": [
@@ -55,10 +55,43 @@
               "schema": {
                 "$ref": "#/components/schemas/CameraRequest"
               },
-              "example": {
-                "camera": "rear",
-                "aspect": "4:3",
-                "focus": false
+              "examples": {
+                "baseline": {
+                  "summary": "Baseline camera settings",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": false,
+                    "focus_range": "auto",
+                    "controls": {}
+                  }
+                },
+                "focusRegion": {
+                  "summary": "Verified normal-range autofocus, central region",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": true,
+                    "focus_range": "normal",
+                    "focus_region": {
+                      "x": 0.25,
+                      "y": 0.25,
+                      "width": 0.5,
+                      "height": 0.5
+                    }
+                  }
+                },
+                "manualLens": {
+                  "summary": "Manual lens position (device units)",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": false,
+                    "controls": {
+                      "manual_focus_position": 500
+                    }
+                  }
+                }
               }
             }
           }
@@ -72,6 +105,12 @@
           },
           "429": {
             "description": "Queue is full"
+          },
+          "409": {
+            "description": "Phone app must be updated to support explicit focus ranges"
+          },
+          "400": {
+            "description": "Invalid camera controls, focus region, or unsupported sensor setting"
           }
         },
         "tags": [
@@ -90,10 +129,57 @@
               "schema": {
                 "$ref": "#/components/schemas/CameraRequest"
               },
-              "example": {
-                "camera": "rear",
-                "aspect": "4:3",
-                "focus": true
+              "examples": {
+                "baseline": {
+                  "summary": "Baseline camera settings",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": true,
+                    "focus_range": "auto",
+                    "controls": {}
+                  }
+                },
+                "focusRegion": {
+                  "summary": "Verified normal-range autofocus, central region",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": true,
+                    "focus_range": "normal",
+                    "focus_region": {
+                      "x": 0.25,
+                      "y": 0.25,
+                      "width": 0.5,
+                      "height": 0.5
+                    }
+                  }
+                },
+                "manualLens": {
+                  "summary": "Manual lens position (device units)",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": false,
+                    "controls": {
+                      "manual_focus_position": 500
+                    }
+                  }
+                },
+                "manualExposure": {
+                  "summary": "Manual ISO and approximately 1/60 second shutter",
+                  "value": {
+                    "camera": "rear",
+                    "aspect": "4:3",
+                    "focus": true,
+                    "focus_range": "normal",
+                    "controls": {
+                      "iso": 3200,
+                      "exposure_time_us": 16667,
+                      "flash_mode": 0
+                    }
+                  }
+                }
               }
             }
           }
@@ -107,6 +193,12 @@
           },
           "429": {
             "description": "Queue is full"
+          },
+          "409": {
+            "description": "Phone app must be updated to support explicit focus ranges"
+          },
+          "400": {
+            "description": "Invalid camera controls, focus region, or unsupported sensor setting"
           }
         },
         "tags": [
@@ -265,6 +357,41 @@
           "Images"
         ]
       }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "operationId": "getCameraCapabilities",
+        "tags": [
+          "Controls"
+        ],
+        "description": "Live per-sensor control choices, ranges and focus-region support reported by Lumia Agent 0.1.9+. ready=false until the phone has registered and reported. Reload /docs after capabilities arrive to see the dynamic control schema.",
+        "responses": {
+          "200": {
+            "description": "Camera capability report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "connected": {
+                      "type": "boolean"
+                    },
+                    "cameras": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -321,7 +448,70 @@
           },
           "focus": {
             "type": "boolean",
-            "description": "Defaults to true for capture, false for preview"
+            "description": "Default true for captures, false for previews. When true, reset stale focus, scan and verify a lock (up to two attempts); a failed lock returns a job error. Fixed-focus cameras report unsupported."
+          },
+          "focus_range": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "normal",
+              "macro",
+              "full",
+              "infinity",
+              "hyperfocal"
+            ],
+            "default": "auto",
+            "description": "Explicit ranges require focus=true, the rear camera and Lumia Agent 0.1.8+. The phone must support the requested range. normal excludes close macro subjects; macro is for close subjects; full scans the full supported range. auto chooses normal, then full, then device default. Returned image metadata lists supported ranges."
+          },
+          "controls": {
+            "type": "object",
+            "description": "Phone-supported native settings. GET /v1/capabilities for actual names, types, ranges and units. The live /openapi.json fills this schema from the current phone. Overrides are per request and restored after acquisition. ISO/exposure/WB accept null for auto where advertised. Manual focus requires focus=false.",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "nullable": true
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "example": {}
+          },
+          "focus_region": {
+            "type": "object",
+            "nullable": true,
+            "description": "Normalized region of the unrotated sensor preview. Requires focus=true and reported focus-region support. Not full-resolution crop pixels.",
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
           }
         }
       },
@@ -357,6 +547,67 @@
           },
           "image": {
             "$ref": "#/components/schemas/Image"
+          },
+          "focus_range": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "normal",
+              "macro",
+              "full",
+              "infinity",
+              "hyperfocal"
+            ]
+          },
+          "controls": {
+            "type": "object",
+            "description": "Phone-supported native settings. GET /v1/capabilities for actual names, types, ranges and units. The live /openapi.json fills this schema from the current phone. Overrides are per request and restored after acquisition. ISO/exposure/WB accept null for auto where advertised. Manual focus requires focus=false.",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "nullable": true
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "example": {}
+          },
+          "focus_region": {
+            "type": "object",
+            "nullable": true,
+            "description": "Normalized region of the unrotated sensor preview. Requires focus=true and reported focus-region support. Not full-resolution crop pixels.",
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
           }
         }
       },
@@ -396,6 +647,95 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "focus_status": {
+            "type": "string",
+            "enum": [
+              "locked",
+              "manual",
+              "skipped",
+              "unsupported"
+            ],
+            "description": "Reported by phone 0.1.8+. A lock is a device autofocus result, not an optical sharpness guarantee."
+          },
+          "focus_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "focus_range": {
+            "type": "string",
+            "description": "Applied range, or device_default/unchanged/fixed/manual."
+          },
+          "supported_focus_ranges": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "macro",
+                "full",
+                "infinity",
+                "hyperfocal"
+              ]
+            }
+          },
+          "applied_controls": {
+            "type": "object",
+            "description": "Actual native values read back after application. Present on new phone versions.",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "nullable": true
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "focus_region": {
+            "type": "object",
+            "nullable": true,
+            "description": "Normalized region of the unrotated sensor preview. Requires focus=true and reported focus-region support. Not full-resolution crop pixels.",
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "iso": {
+            "type": "integer",
+            "description": "Actual capture ISO from JPEG EXIF, when present."
+          },
+          "exposure_seconds": {
+            "type": "number",
+            "description": "Actual shutter exposure from JPEG EXIF, when present."
           }
         }
       }

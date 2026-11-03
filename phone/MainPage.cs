@@ -30,6 +30,7 @@ namespace LumiaAgent
         [DataMember] public string model;
         [DataMember] public string os;
         [DataMember] public string app_version;
+        [DataMember] public int protocol_version = 3;
     }
 
     public class MainPage : PhoneApplicationPage
@@ -43,7 +44,7 @@ namespace LumiaAgent
         readonly Border viewfinderHost = new Border();
         readonly TextBlock previewPlaceholder = new TextBlock { Text = "Live preview is off.\nAgent camera commands are available when connected.", TextWrapping = TextWrapping.Wrap, FontSize = 22, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
         readonly SemaphoreSlim cameraAccess = new SemaphoreSlim(1, 1);
-        readonly TextBlock title = new TextBlock { Text = "LUMIA AGENT 0.1.6", FontSize = 36 };
+        readonly TextBlock title = new TextBlock { Text = "LUMIA AGENT 0.1.12", FontSize = 36 };
         readonly Button blackScreen = new Button { Content = "Black screen now" };
         readonly CheckBox autoBlack = new CheckBox { Content = "OLED protection: black after 30 seconds", IsChecked = true };
         readonly Grid screen = new Grid();
@@ -59,6 +60,7 @@ namespace LumiaAgent
         bool previewEnabled;
         bool initialLoad;
         bool shutterAttached;
+        bool capabilitiesSent;
 
         public MainPage()
         {
@@ -292,6 +294,7 @@ namespace LumiaAgent
             PhoneApplicationService.Current.UserIdleDetectionMode = IdleDetectionMode.Disabled;
             ResetOledTimer();
             session = null;
+            capabilitiesSent = false;
             while (running && mine == generation)
             {
                 bool retry = false;
@@ -300,13 +303,20 @@ namespace LumiaAgent
                     if (session == null)
                     {
                         status.Text = "Connecting to Pi...";
-                        var info = new Registration { model = DeviceStatus.DeviceName, os = System.Environment.OSVersion.Version.ToString(), app_version = "0.1.6" };
+                        var info = new Registration { model = DeviceStatus.DeviceName, os = System.Environment.OSVersion.Version.ToString(), app_version = "0.1.12" };
                         using (var buffer = new MemoryStream())
                         {
                             new DataContractJsonSerializer(typeof(Registration)).WriteObject(buffer, info);
                             session = Encoding.UTF8.GetString(await Request("POST", "/device/register", buffer.ToArray(), "application/json"), 0, 32).Trim();
                             AppLog.Write("Registered with bridge");
+                            capabilitiesSent = false;
                         }
+                    }
+                    if (!capabilitiesSent)
+                    {
+                        await Request("POST", "/device/capabilities", CameraControls.CapabilityJson(), "application/json");
+                        capabilitiesSent = true;
+                        AppLog.Write("Camera capabilities reported");
                     }
                     if (!running || mine != generation) break;
                     status.Text = "Connected. Waiting for an agent command.";
@@ -323,27 +333,54 @@ namespace LumiaAgent
                         if ((kind != "preview" && kind != "capture") || (sensor != "rear" && sensor != "front")) throw new InvalidOperationException("Unsupported camera command");
                         status.Text = "Taking " + sensor + " " + kind + "...";
                         AppLog.Write("Camera command " + sensor + " " + kind);
-                        byte[] jpeg;
+                        CameraImage image;
                         await cameraAccess.WaitAsync();
                         try
                         {
                             if (!running || mine != generation) break;
                             await OpenCamera(sensor, aspect, cameraEpoch);
                             if (!running || mine != generation) break;
-                            if (kind == "preview") jpeg = Preview();
-                            else jpeg = await Capture(command[4].Trim() == "true");
+                            bool focus = command[4].Trim() == "true";
+                            string focusRange = command.Length > 5 ? command[5].Trim() : "auto";
+                            var controls = CameraControls.Parse(command.Length > 6 ? command[6].Trim() : "");
+                            string region = command.Length > 7 ? command[7].Trim() : "";
+                            var scope = new CameraControlScope(camera, controls);
+                            try
+                            {
+                                scope.SetFocusRegion(region);
+                                scope.Apply(true, false);
+                                if (kind == "preview")
+                                {
+                                    var result = await FocusCamera(focus, focusRange, () => scope.SetFocusRegion(region));
+                                    scope.Apply(false, result.Status == "locked");
+                                    if (focus || controls.Count > 0) await Task.Delay(250);
+                                    image = new CameraImage { Jpeg = Preview(), Focus = result };
+                                }
+                                else image = await Capture(focus, focusRange, scope, region);
+                                if (controls.ContainsKey("manual_focus_position")) { image.Focus.Status = "manual"; image.Focus.Range = "manual"; }
+                                image.AppliedControlsJson = scope.AppliedJson();
+                            }
+                            finally
+                            {
+                                scope.Dispose();
+                                if (scope.RestoreFailed)
+                                {
+                                    if (camera != null) { camera.Dispose(); camera = null; }
+                                    currentCamera = currentAspect = null;
+                                }
+                            }
                         }
                         finally { cameraAccess.Release(); }
                         if (!running || mine != generation) break;
-                        status.Text = "Uploading " + jpeg.Length + " bytes...";
-                        await Request("POST", "/device/result/" + id, jpeg, "image/jpeg");
+                        status.Text = "Uploading " + image.Jpeg.Length + " bytes...";
+                        await Request("POST", "/device/result/" + id, image.Jpeg, "image/jpeg", image.Focus, image.AppliedControlsJson);
                         AppLog.Write("Image uploaded");
                     }
                     catch (Exception error)
                     {
                         if (!running || mine != generation) break;
-                        cameraError = error.Message;
-                        AppLog.Write("Camera error " + error.GetType().FullName);
+                        cameraError = error.GetType().Name + ": " + (String.IsNullOrEmpty(error.Message) ? "The camera driver did not provide an error message." : error.Message);
+                        AppLog.Exception("Camera error", error);
                     }
                     if (cameraError != null)
                     {
@@ -409,25 +446,95 @@ namespace LumiaAgent
             }
         }
 
-        async Task<byte[]> Capture(bool focus)
+        static AutoFocusRange RangeValue(string name)
         {
-            if (focus && PhotoCaptureDevice.IsFocusSupported(camera.SensorLocation)) await camera.FocusAsync();
+            switch (name)
+            {
+                case "normal": return AutoFocusRange.Normal;
+                case "macro": return AutoFocusRange.Macro;
+                case "full": return AutoFocusRange.Full;
+                case "infinity": return AutoFocusRange.Infinity;
+                case "hyperfocal": return AutoFocusRange.Hyperfocal;
+                default: throw new InvalidOperationException("Unknown focus range");
+            }
+        }
+
+        string[] SupportedFocusRanges()
+        {
+            try
+            {
+                var values = PhotoCaptureDevice.GetSupportedPropertyValues(camera.SensorLocation, KnownCameraGeneralProperties.AutoFocusRange);
+                return new[] { "normal", "macro", "full", "infinity", "hyperfocal" }
+                    .Where(name => values.Any(value => Convert.ToInt32(value) == (int)RangeValue(name))).ToArray();
+            }
+            catch (Exception error)
+            {
+                AppLog.Write("Focus range query unavailable " + error.GetType().FullName);
+                return new string[0];
+            }
+        }
+
+        async Task<FocusResult> FocusCamera(bool requested, string requestedRange, Action applyRegion = null)
+        {
+            if (!requested) return new FocusResult { Status = "skipped", Attempts = 0, Range = "unchanged", SupportedRanges = "" };
+            if (!PhotoCaptureDevice.IsFocusSupported(camera.SensorLocation))
+                return new FocusResult { Status = "unsupported", Attempts = 0, Range = "fixed", SupportedRanges = "" };
+
+            string[] supported = SupportedFocusRanges();
+            string selected = requestedRange;
+            if (selected == "auto") selected = supported.Contains("normal") ? "normal" : supported.Contains("full") ? "full" : "device_default";
+            if (selected != "device_default" && !supported.Contains(selected))
+                throw new InvalidOperationException("Focus range '" + selected + "' is unavailable. Supported: " + String.Join(", ", supported));
+
+            // A previous lock must not turn a new request into a stale-focus capture.
+            // Focus remains explicitly locked until the exposure finishes.
+            for (int attempt = 1; attempt <= 2; attempt++)
+            {
+                status.Text = "Focusing (attempt " + attempt + ")...";
+                camera.SetProperty(KnownCameraPhotoProperties.LockedAutoFocusParameters, AutoFocusParameters.None);
+                await camera.ResetFocusAsync();
+                if (applyRegion != null) applyRegion();
+                if (selected != "device_default") camera.SetProperty(KnownCameraGeneralProperties.AutoFocusRange, RangeValue(selected));
+                var result = await camera.FocusAsync();
+                AppLog.Write("Autofocus " + result + " range " + selected + " attempt " + attempt);
+                if (result == CameraFocusStatus.Locked)
+                {
+                    camera.SetProperty(KnownCameraPhotoProperties.LockedAutoFocusParameters, AutoFocusParameters.Focus);
+                    return new FocusResult { Status = "locked", Attempts = attempt, Range = selected, SupportedRanges = String.Join(",", supported) };
+                }
+                if (attempt < 2) await Task.Delay(250);
+            }
+            throw new InvalidOperationException("Autofocus did not lock after two attempts in range '" + selected + "'. Supported ranges: " + String.Join(", ", supported) + ". Aim at a well-lit, detailed subject and retry. Use focus=false only to keep the current focus position.");
+        }
+
+        async Task<CameraImage> Capture(bool focus, string focusRange, CameraControlScope scope, string region)
+        {
             using (var stream = new MemoryStream())
             {
                 var sequence = camera.CreateCaptureSequence(1);
                 sequence.Frames[0].CaptureStream = stream.AsOutputStream();
                 await camera.PrepareCaptureSequenceAsync(sequence);
+                var result = await FocusCamera(focus, focusRange, () => scope.SetFocusRegion(region));
+                scope.Apply(false, result.Status == "locked");
                 await sequence.StartCaptureAsync();
-                return stream.ToArray(); // Keep the full JPEG encoded; no 38 MP bitmap on phone.
+                return new CameraImage { Jpeg = stream.ToArray(), Focus = result }; // No 38 MP bitmap on phone.
             }
         }
 
-        async Task<byte[]> Request(string method, string path, byte[] body, string contentType)
+        async Task<byte[]> Request(string method, string path, byte[] body, string contentType, FocusResult focusResult = null, string appliedControls = null)
         {
             var request = (HttpWebRequest)WebRequest.Create(endpoint + path);
             request.Method = method;
             request.Headers["Authorization"] = "Bearer " + secret;
             if (session != null && path != "/device/register") request.Headers["X-Device-Session"] = session;
+            if (focusResult != null)
+            {
+                request.Headers["X-Camera-Focus-Status"] = focusResult.Status;
+                request.Headers["X-Camera-Focus-Attempts"] = focusResult.Attempts.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                request.Headers["X-Camera-Focus-Range"] = focusResult.Range;
+                if (!String.IsNullOrEmpty(focusResult.SupportedRanges)) request.Headers["X-Camera-Focus-Ranges"] = focusResult.SupportedRanges;
+            }
+            if (appliedControls != null) request.Headers["X-Camera-Applied-Controls"] = appliedControls;
             // WP's HTTP stack buffers the request and supplies Content-Length.
             if (body != null)
             {

@@ -14,11 +14,20 @@ def main():
     parser.add_argument('--config', default='config.json')
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('status')
+    commands.add_parser('capabilities')
     for name in ('preview', 'capture'):
         cmd = commands.add_parser(name)
         cmd.add_argument('--camera', choices=['rear', 'front'], default='rear')
         cmd.add_argument('--aspect', choices=['4:3', '16:9', 'maximum'], default='4:3')
-        cmd.add_argument('--no-focus', action='store_true')
+        focus = cmd.add_mutually_exclusive_group()
+        focus.add_argument('--focus', dest='focus', action='store_true', help='Run and verify autofocus, including for previews')
+        focus.add_argument('--no-focus', dest='focus', action='store_false', help='Skip explicit autofocus; use manual_focus_position for a chosen lens position')
+        cmd.set_defaults(focus=name == 'capture')
+        cmd.add_argument('--focus-range', choices=['auto', 'normal', 'macro', 'full', 'infinity', 'hyperfocal'], default='auto')
+        controls = cmd.add_mutually_exclusive_group()
+        controls.add_argument('--controls', help='JSON object of native camera controls; see capabilities')
+        controls.add_argument('--controls-file', type=Path, help='JSON file of native camera controls')
+        cmd.add_argument('--focus-region', type=float, nargs=4, metavar=('X', 'Y', 'WIDTH', 'HEIGHT'), help='Normalized unrotated preview region; requires --focus')
         cmd.add_argument('--out', required=True, type=Path)
     cmd = commands.add_parser('crop')
     cmd.add_argument('image_id')
@@ -38,14 +47,21 @@ def main():
                 return content if binary else json.loads(content)
         except HTTPError as error:
             raise SystemExit('HTTP %s: %s' % (error.code, error.read().decode()))
-    if args.command == 'status':
-        print(json.dumps(request('/v1/status'), indent=2))
+    if args.command in ('status', 'capabilities'):
+        print(json.dumps(request('/v1/' + args.command), indent=2))
         return
     if args.command == 'crop':
         image = request('/v1/images/' + args.image_id + '/crop', {k: getattr(args, k) for k in ('x', 'y', 'width', 'height')})
     else:
+        try:
+            controls = json.loads(args.controls_file.read_text('utf-8-sig')) if args.controls_file else json.loads(args.controls) if args.controls else {}
+        except (ValueError, OSError) as error:
+            raise SystemExit('Cannot read camera controls: ' + str(error)) from error
+        if not isinstance(controls, dict):
+            raise SystemExit('Camera controls must be a JSON object')
+        region = dict(zip(('x', 'y', 'width', 'height'), args.focus_region)) if args.focus_region else None
         job = request('/v1/preview' if args.command == 'preview' else '/v1/captures',
-                      dict(camera=args.camera, aspect=args.aspect, focus=args.command == 'capture' and not args.no_focus))
+                      dict(camera=args.camera, aspect=args.aspect, focus=args.focus, focus_range=args.focus_range, controls=controls, focus_region=region))
         deadline = time.monotonic() + 190
         while job['status'] in ('queued', 'running'):
             if time.monotonic() > deadline:
