@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Deployment xmlns="http://schemas.microsoft.com/windowsphone/2012/deployment" AppPlatformVersion="8.0">
+ <DefaultLanguage xmlns="" code="en-US" />
+ <App xmlns="" ProductID="{D66C350D-2C68-4C77-91F5-0871A6A44A83}" Title="Lumia Agent" RuntimeType="Silverlight"
+  Version="0.1.6.0" Genre="apps.normal" Author="Lumia Agent" Description="Camera bridge for local AI agents"
+  Publisher="Lumia Agent" PublisherID="{9601B85A-664A-420D-B641-6EA7C765BA66}">
+  <IconPath IsRelative="true" IsResource="false">ApplicationIcon.png</IconPath>
+  <Capabilities><Capability Name="ID_CAP_NETWORKING" /><Capability Name="ID_CAP_ISV_CAMERA" /></Capabilities>
+  <Tasks><DefaultTask Name="_default" NavigationPage="MainPage.xaml" /></Tasks>
+  <Tokens><PrimaryToken TokenID="LumiaAgentToken" TaskName="_default"><TemplateFlip>
+   <SmallImageURI IsRelative="true" IsResource="false">ApplicationIcon.png</SmallImageURI>
+   <Count>0</Count><BackgroundImageURI IsRelative="true" IsResource="false">Tile.png</BackgroundImageURI>
+   <Title>Lumia Agent</Title><BackContent /><BackBackgroundImageURI /><BackTitle />
+   <DeviceLockImageURI /><HasLarge>false</HasLarge>
+  </TemplateFlip></PrimaryToken></Tokens>
+  <ScreenResolutions><ScreenResolution Name="ID_RESOLUTION_WVGA" /><ScreenResolution Name="ID_RESOLUTION_WXGA" /><ScreenResolution Name="ID_RESOLUTION_HD720P" /></ScreenResolutions>
+ </App>
+</Deployment>

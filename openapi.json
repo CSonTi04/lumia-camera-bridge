@@ -1,0 +1,404 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Lumia Agent Camera",
+    "version": "0.2.0",
+    "description": "Asynchronous preview and full-resolution still capture through a Raspberry Pi bridge. Coordinates use unrotated encoded JPEG pixels. Phone app must be foregrounded. Manual workflow: authorize with agent_token, submit a camera job, poll its id, then retrieve image.url or crop the retained original. Keep Lumia Agent open; use the explorer from another device."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This bridge (same origin as the API explorer)"
+    }
+  ],
+  "security": [
+    {
+      "agentToken": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service is running"
+          }
+        },
+        "tags": [
+          "Service"
+        ]
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Phone connectivity, model, job state, and retained image count"
+          }
+        },
+        "tags": [
+          "Service"
+        ]
+      }
+    },
+    "/v1/preview": {
+      "post": {
+        "operationId": "takePreview",
+        "description": "Queue a viewfinder snapshot. Poll the returned job. Not a full-resolution still.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CameraRequest"
+              },
+              "example": {
+                "camera": "rear",
+                "aspect": "4:3",
+                "focus": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Job"
+          },
+          "503": {
+            "description": "No phone connected"
+          },
+          "429": {
+            "description": "Queue is full"
+          }
+        },
+        "tags": [
+          "Camera"
+        ]
+      }
+    },
+    "/v1/captures": {
+      "post": {
+        "operationId": "captureFullResolution",
+        "description": "Rear requests documented 1020 38 MP 4:3 or 34 MP 16:9 mode. Front uses actual maximum resolution. Rear images below 30 MP fail explicitly.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CameraRequest"
+              },
+              "example": {
+                "camera": "rear",
+                "aspect": "4:3",
+                "focus": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "$ref": "#/components/responses/Job"
+          },
+          "503": {
+            "description": "No phone connected"
+          },
+          "429": {
+            "description": "Queue is full"
+          }
+        },
+        "tags": [
+          "Camera"
+        ]
+      }
+    },
+    "/v1/jobs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/id"
+        }
+      ],
+      "get": {
+        "operationId": "getJob",
+        "description": "Poll until done/error. Jobs expire after 180 seconds; records retained up to one hour.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "404": {
+            "description": "Unknown or no longer retained job"
+          }
+        },
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/v1/images/{id}.jpg": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/id"
+        }
+      ],
+      "get": {
+        "operationId": "downloadImage",
+        "responses": {
+          "200": {
+            "description": "JPEG bytes (capture originals are preserved byte for byte)",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown image"
+          }
+        },
+        "tags": [
+          "Images"
+        ]
+      }
+    },
+    "/v1/images/{id}/thumbnail.jpg": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/id"
+        }
+      ],
+      "get": {
+        "operationId": "thumbnail",
+        "parameters": [
+          {
+            "name": "max",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 4096,
+              "default": 1280
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JPEG thumbnail, same raster orientation as original",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Images"
+        ]
+      }
+    },
+    "/v1/images/{id}/crop": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/id"
+        }
+      ],
+      "post": {
+        "operationId": "cropImage",
+        "description": "Crop an existing image; no new camera exposure. Integer source JPEG pixels, top-left origin. JPEG quality 95, no resize/rotation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "x",
+                  "y",
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "height": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Crop metadata and download URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Image"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/out-of-bounds crop"
+          }
+        },
+        "tags": [
+          "Images"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "agentToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "agent_token from bridge config; never use device_token for these routes"
+      }
+    },
+    "parameters": {
+      "id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        }
+      }
+    },
+    "responses": {
+      "Job": {
+        "description": "Job metadata; image appears on successful completion",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "CameraRequest": {
+        "type": "object",
+        "properties": {
+          "camera": {
+            "type": "string",
+            "enum": [
+              "rear",
+              "front"
+            ],
+            "default": "rear"
+          },
+          "aspect": {
+            "type": "string",
+            "enum": [
+              "4:3",
+              "16:9",
+              "maximum"
+            ],
+            "default": "4:3"
+          },
+          "focus": {
+            "type": "boolean",
+            "description": "Defaults to true for capture, false for preview"
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "capture"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "done",
+              "error"
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "image": {
+            "$ref": "#/components/schemas/Image"
+          }
+        }
+      },
+      "Image": {
+        "type": "object",
+        "required": [
+          "id",
+          "width",
+          "height",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "exif_orientation": {
+            "type": "integer"
+          },
+          "coordinates": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

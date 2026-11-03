@@ -1,0 +1,5 @@
+{
+  "address": "http://raspberrypi.local:8765",
+  "device_token": "REPLACE_WITH_DEVICE_TOKEN_FROM_PRIVATE_PI_CONFIG",
+  "connect_on_launch": true
+}

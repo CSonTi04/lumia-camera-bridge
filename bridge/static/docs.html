@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumia Camera API</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/swagger/swagger-ui.css">
+  <style>body{margin:0;background:#fafafa}header{max-width:1460px;margin:auto;padding:20px 24px;font:16px/1.5 system-ui,sans-serif}h1{margin:0 0 8px;font-size:26px}p{margin:6px 0}a{color:#1459a6}.swagger-ui .info{margin:20px 0}</style>
+</head>
+<body>
+  <header>
+    <h1>Lumia Camera API</h1>
+    <p>Keep Lumia Agent open on the Lumia. Use this page from another phone, tablet or computer.</p>
+    <p>Click <strong>Authorize</strong> and paste your <strong>agent_token</strong>. The token is kept only for this page session.</p>
+    <p>Try <strong>GET /v1/status</strong>. For a photo: <strong>POST /v1/preview</strong> or <strong>/v1/captures</strong>, poll <strong>GET /v1/jobs/{id}</strong>, then download the returned image. Crop an existing original with <strong>POST /v1/images/{id}/crop</strong>.</p>
+    <p><a href="/openapi.json">Download OpenAPI definition</a></p>
+  </header>
+  <div id="swagger-ui"></div>
+  <script src="/static/swagger/swagger-ui-bundle.js"></script>
+  <script src="/static/swagger-init.js"></script>
+</body>
+</html>

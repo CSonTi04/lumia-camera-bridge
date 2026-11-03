@@ -1,0 +1,23 @@
+[Unit]
+Description=Lumia camera HTTP bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lumia-agent
+Group=lumia-agent
+WorkingDirectory=/opt/lumia-agent
+ExecStart=/opt/lumia-agent/.venv/bin/python /opt/lumia-agent/bridge/lumia_bridge.py --host 0.0.0.0 --port 8765 --config /etc/lumia-agent/config.json --data /var/lib/lumia-agent
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lumia-agent
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
